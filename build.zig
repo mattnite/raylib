@@ -1,6 +1,6 @@
 const std = @import("std");
-const raylib = @import("src/build.zig");
 
+// This has been tested to work with zig master branch as of commit 87de821 or May 14 2023
 pub fn build(b: *std.Build) void {
     // Standard target options allows the person running `zig build` to choose
     // what target to build for. Here we do not override the defaults, which
@@ -12,7 +12,110 @@ pub fn build(b: *std.Build) void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
-    const lib = raylib.addRaylib(b, target, optimize);
+    const lib = addRaylib(b, target, optimize);
     lib.installHeader("src/raylib.h", "raylib.h");
-    lib.install();
+    b.installArtifact(lib);
+}
+
+pub fn addRaylib(b: *std.Build, target: std.zig.CrossTarget, optimize: std.builtin.OptimizeMode) *std.Build.CompileStep {
+    const raylib_flags = &[_][]const u8{
+        "-std=gnu99",
+        "-D_GNU_SOURCE",
+        "-DGL_SILENCE_DEPRECATION=199309L",
+    };
+
+    const raylib = b.addStaticLibrary(.{
+        .name = "raylib",
+        .target = target,
+        .optimize = optimize,
+    });
+    raylib.linkLibC();
+
+    raylib.addIncludePath(.{ .path = "src/external/glfw/include" });
+
+    raylib.addCSourceFiles(&.{
+        "src/raudio.c",
+        "src/rcore.c",
+        "src/rmodels.c",
+        "src/rshapes.c",
+        "src/rtext.c",
+        "src/rtextures.c",
+        "src/utils.c",
+    }, raylib_flags);
+
+    switch (target.getOsTag()) {
+        .windows => {
+            raylib.addCSourceFiles(&.{"src/rglfw.c"}, raylib_flags);
+            raylib.linkSystemLibrary("winmm");
+            raylib.linkSystemLibrary("gdi32");
+            raylib.linkSystemLibrary("opengl32");
+            raylib.addIncludePath(.{ .path = "external/glfw/deps/mingw" });
+
+            raylib.defineCMacro("PLATFORM_DESKTOP", null);
+        },
+        .linux => {
+            raylib.addCSourceFiles(&.{"src/rglfw.c"}, raylib_flags);
+            raylib.linkSystemLibrary("GL");
+            raylib.linkSystemLibrary("rt");
+            raylib.linkSystemLibrary("dl");
+            raylib.linkSystemLibrary("m");
+            raylib.linkSystemLibrary("X11");
+            raylib.addIncludePath(.{ .path = "/usr/include" });
+
+            raylib.defineCMacro("PLATFORM_DESKTOP", null);
+        },
+        .freebsd, .openbsd, .netbsd, .dragonfly => {
+            raylib.addCSourceFiles(&.{"src/rglfw.c"}, raylib_flags);
+            raylib.linkSystemLibrary("GL");
+            raylib.linkSystemLibrary("rt");
+            raylib.linkSystemLibrary("dl");
+            raylib.linkSystemLibrary("m");
+            raylib.linkSystemLibrary("X11");
+            raylib.linkSystemLibrary("Xrandr");
+            raylib.linkSystemLibrary("Xinerama");
+            raylib.linkSystemLibrary("Xi");
+            raylib.linkSystemLibrary("Xxf86vm");
+            raylib.linkSystemLibrary("Xcursor");
+
+            raylib.defineCMacro("PLATFORM_DESKTOP", null);
+        },
+        .macos => {
+            // On macos rglfw.c include Objective-C files.
+            const raylib_flags_extra_macos = &[_][]const u8{
+                "-ObjC",
+            };
+            raylib.addCSourceFiles(
+                &.{"src/rglfw.c"},
+                raylib_flags ++ raylib_flags_extra_macos,
+            );
+            raylib.linkFramework("Foundation");
+            raylib.linkFramework("CoreServices");
+            raylib.linkFramework("CoreGraphics");
+            raylib.linkFramework("AppKit");
+            raylib.linkFramework("IOKit");
+
+            raylib.defineCMacro("PLATFORM_DESKTOP", null);
+        },
+        .emscripten => {
+            raylib.defineCMacro("PLATFORM_WEB", null);
+            raylib.defineCMacro("GRAPHICS_API_OPENGL_ES2", null);
+
+            if (b.sysroot == null) {
+                @panic("Pass '--sysroot \"$EMSDK/upstream/emscripten\"'");
+            }
+
+            const cache_include = std.fs.path.join(b.allocator, &.{ b.sysroot.?, "cache", "sysroot", "include" }) catch @panic("Out of memory");
+            defer b.allocator.free(cache_include);
+
+            var dir = std.fs.openDirAbsolute(cache_include, std.fs.Dir.OpenDirOptions{ .access_sub_paths = true, .no_follow = true }) catch @panic("No emscripten cache. Generate it!");
+            dir.close();
+
+            raylib.addIncludePath(.{ .path = cache_include });
+        },
+        else => {
+            @panic("Unsupported OS");
+        },
+    }
+
+    return raylib;
 }
